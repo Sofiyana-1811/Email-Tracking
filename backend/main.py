@@ -138,15 +138,24 @@ async def track_open(email_id: str, request: Request):
 # GET /track/click/{email_id}
 # ---------------------------------------------------------------------------
 @app.get("/track/click/{email_id}")
-async def track_click(email_id: str, url: str):
+async def track_click(email_id: str, url: str, request: Request):
     if email_id in emails:
-        rec = emails[email_id]
-        rec["clicked_at"] = datetime.now(timezone.utc).isoformat()
-        rec["clicked_link"] = url
-        rec["status"] = "clicked"
-        rec["open_confidence"] = "confirmed"
-
-    return RedirectResponse(url=url, status_code=302)
+        emails[email_id]["clicked_at"] = datetime.now().isoformat()
+        emails[email_id]["clicked_link"] = url
+        emails[email_id]["status"] = "clicked"
+        emails[email_id]["open_confidence"] = "confirmed"
+    
+    # Meta refresh bypasses ngrok interstitial
+    html = f"""
+    <html>
+      <head>
+        <meta http-equiv="refresh" content="0; url={url}" />
+      </head>
+      <body>Redirecting...</body>
+    </html>
+    """
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(content=html)
 
 
 # ---------------------------------------------------------------------------
