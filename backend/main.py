@@ -121,15 +121,16 @@ async def track_open(email_id: str, request: Request):
         ua = request.headers.get("user-agent", "")
         is_apple = "Apple" in ua and "Mail" in ua
         rec["open_count"] += 1
+        rec["is_apple_proxy"] = is_apple
+        rec["user_agent"] = ua
 
         if not rec["pixel_fired"]:
             rec["pixel_fired"] = True
             rec["opened_at"] = datetime.now(timezone.utc).isoformat()
-            rec["status"] = "opened"
-            rec["open_confidence"] = "uncertain" if is_apple else "likely"
-
-        rec["is_apple_proxy"] = is_apple
-        rec["user_agent"] = ua
+            # Only set status/confidence if not already confirmed by a click
+            if rec["open_confidence"] != "confirmed":
+                rec["status"] = "opened"
+                rec["open_confidence"] = "uncertain" if is_apple else "likely"
 
     return Response(content=TRACKING_PIXEL, media_type="image/gif")
 
@@ -140,20 +141,22 @@ async def track_open(email_id: str, request: Request):
 @app.get("/track/click/{email_id}")
 async def track_click(email_id: str, url: str, request: Request):
     if email_id in emails:
-        emails[email_id]["clicked_at"] = datetime.now().isoformat()
-        emails[email_id]["clicked_link"] = url
-        emails[email_id]["status"] = "clicked"
-        emails[email_id]["open_confidence"] = "confirmed"
-    
-    # Meta refresh bypasses ngrok interstitial
-    html = f"""
-    <html>
-      <head>
-        <meta http-equiv="refresh" content="0; url={url}" />
-      </head>
+        rec = emails[email_id]
+        rec["clicked_at"] = datetime.now(timezone.utc).isoformat()
+        rec["clicked_link"] = url
+        rec["status"] = "clicked"
+        rec["open_confidence"] = "confirmed"
+        # If pixel never fired, still mark as opened via click
+        if not rec["opened_at"]:
+            rec["opened_at"] = rec["clicked_at"]
+        if not rec["pixel_fired"]:
+            rec["open_count"] += 1
+            rec["pixel_fired"] = True
+
+    html = f"""<html>
+      <head><meta http-equiv="refresh" content="0; url={url}" /></head>
       <body>Redirecting...</body>
-    </html>
-    """
+    </html>"""
     from fastapi.responses import HTMLResponse
     return HTMLResponse(content=html)
 
@@ -163,16 +166,35 @@ async def track_click(email_id: str, url: str, request: Request):
 # ---------------------------------------------------------------------------
 @app.post("/webhook/resend")
 async def webhook_resend(request: Request):
-    body = await request.json()
+    try:
+        body = await request.json()
+        print("RESEND WEBHOOK PAYLOAD:", body)
+    except Exception:
+        return {"ok": True}
+
     event_type = body.get("type", "")
     data = body.get("data", {})
 
-    # Find email_id from tags
+    # Resend sends tags in multiple formats depending on API version
+    # Handle all of them
     email_id = None
-    for tag in data.get("tags", []):
-        if tag.get("name") == "email_id":
-            email_id = tag.get("value")
-            break
+    tags = data.get("tags", [])
+
+    if isinstance(tags, list):
+        for tag in tags:
+            if isinstance(tag, dict):
+                # Format: [{"name": "email_id", "value": "..."}]
+                if tag.get("name") == "email_id":
+                    email_id = tag.get("value")
+                    break
+            elif isinstance(tag, str):
+                # Format: ["email_id:abc123"]
+                if tag.startswith("email_id:"):
+                    email_id = tag.split(":", 1)[1]
+                    break
+    elif isinstance(tags, dict):
+        # Format: {"email_id": "abc123"}
+        email_id = tags.get("email_id")
 
     if not email_id or email_id not in emails:
         return {"ok": True}
@@ -186,7 +208,6 @@ async def webhook_resend(request: Request):
         rec["bounce_type"] = data.get("bounce", {}).get("type")
     elif event_type == "email.complained":
         rec["status"] = "spam"
-    # Ignore email.opened — we track opens via our own pixel
 
     return {"ok": True}
 
