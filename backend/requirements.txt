@@ -1,4 +1,11 @@
 fastapi
-uvicorn
+uvicorn[standard]
+sqlalchemy[asyncio]
+asyncpg
+alembic
 resend
 python-dotenv
+apscheduler
+google-generativeai
+python-multipart
+pydantic[email]
