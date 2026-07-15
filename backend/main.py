@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Depends, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, HTMLResponse
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from dotenv import load_dotenv
 import resend
@@ -49,6 +49,17 @@ async def lifespan(app: FastAPI):
     # Create tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # `create_all` does not alter existing tables. Keep databases created by
+        # the later campaign phases compatible with Phase 1 workspace-only sends.
+        await conn.execute(text("ALTER TABLE emails ADD COLUMN IF NOT EXISTS to_email VARCHAR(255)"))
+        await conn.execute(text("ALTER TABLE emails ALTER COLUMN campaign_id DROP NOT NULL"))
+        await conn.execute(text("ALTER TABLE emails ALTER COLUMN prospect_id DROP NOT NULL"))
+        await conn.execute(text("""
+            UPDATE emails AS email
+            SET to_email = prospect.email
+            FROM prospects AS prospect
+            WHERE email.prospect_id = prospect.id AND email.to_email IS NULL
+        """))
     # Start background scheduler
     scheduler.start()
     logger.info("Scheduler started successfully")
@@ -197,9 +208,25 @@ async def csv_upload(
 # ---------------------------------------------------------------------------
 @app.post("/send-email", response_model=schemas.EmailResponse)
 async def send_email(payload: schemas.SendEmailRequest, db: AsyncSession = Depends(get_db_dep)):
-    prospect = await crud.get_prospect(db, payload.prospect_id)
-    if not prospect:
-        raise HTTPException(status_code=404, detail="Prospect not found")
+    workspace = await crud.get_workspace(db, payload.workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    prospect = None
+    recipient = str(payload.to)
+    if payload.prospect_id:
+        prospect = await crud.get_prospect(db, payload.prospect_id)
+        if not prospect:
+            raise HTTPException(status_code=404, detail="Prospect not found")
+        if prospect.workspace_id != payload.workspace_id:
+            raise HTTPException(status_code=400, detail="Prospect does not belong to this workspace")
+        if payload.campaign_id and prospect.campaign_id != payload.campaign_id:
+            raise HTTPException(status_code=400, detail="Prospect does not belong to this campaign")
+        recipient = prospect.email
+    elif payload.campaign_id:
+        campaign = await crud.get_campaign(db, payload.campaign_id)
+        if not campaign or campaign.workspace_id != payload.workspace_id:
+            raise HTTPException(status_code=400, detail="Campaign does not belong to this workspace")
         
     email_id = uuid.uuid4()
     modified_html = tracking.inject_tracking(payload.body_html, email_id, BASE_URL)
@@ -207,7 +234,7 @@ async def send_email(payload: schemas.SendEmailRequest, db: AsyncSession = Depen
     try:
         resend.Emails.send({
             "from": FROM_EMAIL,
-            "to": prospect.email,
+            "to": recipient,
             "subject": payload.subject,
             "html": modified_html,
             "tags": [{"name": "email_id", "value": str(email_id)}]
@@ -216,7 +243,7 @@ async def send_email(payload: schemas.SendEmailRequest, db: AsyncSession = Depen
         raise HTTPException(status_code=500, detail=f"Failed to send email via Resend: {str(exc)}")
         
     # Get sequence step
-    seq = await crud.get_outbound_emails_count_for_prospect(db, prospect.id) + 1
+    seq = await crud.get_outbound_emails_count_for_prospect(db, prospect.id) + 1 if prospect else 1
     
     email_rec = {
         "id": email_id,
@@ -224,6 +251,7 @@ async def send_email(payload: schemas.SendEmailRequest, db: AsyncSession = Depen
         "campaign_id": payload.campaign_id,
         "prospect_id": payload.prospect_id,
         "direction": "outbound",
+        "to_email": recipient,
         "subject": payload.subject,
         "body_html": modified_html,
         "status": "sent",
@@ -237,7 +265,7 @@ async def send_email(payload: schemas.SendEmailRequest, db: AsyncSession = Depen
     
     created_email = await crud.create_email(db, email_rec)
     
-    if prospect.status == "pending":
+    if prospect and prospect.status == "pending":
         await crud.update_prospect_status(db, prospect.id, "active")
         
     return created_email
@@ -394,6 +422,7 @@ async def webhook_resend_inbound(request: Request, db: AsyncSession = Depends(ge
             "campaign_id": prospect.campaign_id,
             "prospect_id": prospect.id,
             "direction": "inbound",
+            "to_email": FROM_EMAIL,
             "subject": subject,
             "body_html": html_body or text_body,
             "status": "delivered",
@@ -483,6 +512,7 @@ async def approve_followup(
         "campaign_id": prospect.campaign_id,
         "prospect_id": prospect.id,
         "direction": "outbound",
+        "to_email": prospect.email,
         "subject": subject,
         "body_html": modified_html,
         "status": "sent",
@@ -522,11 +552,12 @@ async def reject_followup(followup_id: uuid.UUID, db: AsyncSession = Depends(get
 # ---------------------------------------------------------------------------
 @app.get("/emails", response_model=List[schemas.EmailResponse])
 async def list_emails(
+    workspace_id: Optional[uuid.UUID] = None,
     campaign_id: Optional[uuid.UUID] = None, 
     prospect_id: Optional[uuid.UUID] = None, 
     db: AsyncSession = Depends(get_db_dep)
 ):
-    return await crud.list_emails(db, campaign_id, prospect_id)
+    return await crud.list_emails(db, workspace_id, campaign_id, prospect_id)
 
 @app.get("/emails/{email_id}", response_model=schemas.EmailResponse)
 async def get_email(email_id: uuid.UUID, db: AsyncSession = Depends(get_db_dep)):

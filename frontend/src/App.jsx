@@ -1,7 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
-
-const API = 'http://localhost:8000';
+import { emailApi } from './api';
 
 const STATUS_COLORS = {
   sent: '#6b7280',
@@ -35,6 +33,7 @@ function timeAgo(iso) {
 }
 
 export default function App() {
+  const [workspaceId, setWorkspaceId] = useState('');
   const [to, setTo] = useState('');
   const [subject, setSubject] = useState('');
   const [bodyHtml, setBodyHtml] = useState(
@@ -45,16 +44,22 @@ export default function App() {
   const [emails, setEmails] = useState([]);
   const toastTimer = useRef(null);
 
-  // Poll emails every 3 seconds
   useEffect(() => {
-    const fetch = () =>
-      axios
-        .get(`${API}/emails`)
-        .then((r) => setEmails(r.data))
-        .catch(() => {});
+    let active = true;
+    const fetch = async () => {
+      try {
+        const data = await emailApi.list();
+        if (active) setEmails(data);
+      } catch {
+        // The API may be offline while the frontend is being configured.
+      }
+    };
     fetch();
     const id = setInterval(fetch, 3000);
-    return () => clearInterval(id);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
   }, []);
 
   // Toast auto-dismiss
@@ -67,26 +72,27 @@ export default function App() {
 
   async function handleSend(e) {
     e.preventDefault();
-    if (!to || !subject) return;
+    if (!workspaceId || !to || !subject) return;
     setSending(true);
     try {
-      const res = await axios.post(`${API}/send-email`, {
+      const response = await emailApi.send({
+        workspace_id: workspaceId,
         to,
         subject,
         body_html: bodyHtml,
       });
-      setToast({ type: 'success', msg: `Sent! ID: ${res.data.email_id}` });
+      setToast({ type: 'success', msg: `Sent! ID: ${response.id}` });
       setTo('');
       setSubject('');
       setBodyHtml(
         '<p>Hi there! Check out our <a href="https://example.com">website</a>.</p>'
       );
       // Refresh immediately
-      axios.get(`${API}/emails`).then((r) => setEmails(r.data));
+      emailApi.list().then(setEmails).catch(() => {});
     } catch (err) {
       setToast({
         type: 'error',
-        msg: err.response?.data?.detail || 'Send failed',
+        msg: err.response?.data?.detail || 'Send failed. Check that the API is running.',
       });
     } finally {
       setSending(false);
@@ -127,6 +133,16 @@ export default function App() {
             <h2>Compose</h2>
           </div>
           <form className="compose-form" onSubmit={handleSend}>
+            <label>
+              <span className="label-text">Workspace ID</span>
+              <input
+                type="text"
+                placeholder="Workspace UUID"
+                value={workspaceId}
+                onChange={(e) => setWorkspaceId(e.target.value)}
+                required
+              />
+            </label>
             <label>
               <span className="label-text">To</span>
               <input
@@ -197,7 +213,7 @@ export default function App() {
                 <tbody>
                   {emails.map((em) => (
                     <tr key={em.id}>
-                      <td className="cell-to">{em.to}</td>
+                      <td className="cell-to">{em.to_email || em.prospect_email || '—'}</td>
                       <td className="cell-subject">{em.subject}</td>
                       <td>
                         <Badge text={em.status} colorMap={STATUS_COLORS} />

@@ -65,18 +65,20 @@ class ProspectResponse(BaseModel):
 # Email schemas
 class SendEmailRequest(BaseModel):
     workspace_id: uuid.UUID
-    campaign_id: uuid.UUID
-    prospect_id: uuid.UUID
+    to: EmailStr
     subject: str
     body_html: str
+    campaign_id: Optional[uuid.UUID] = None
+    prospect_id: Optional[uuid.UUID] = None
 
 class EmailResponse(BaseModel):
     id: uuid.UUID
     workspace_id: uuid.UUID
-    campaign_id: uuid.UUID
-    prospect_id: uuid.UUID
+    campaign_id: Optional[uuid.UUID] = None
+    prospect_id: Optional[uuid.UUID] = None
     resend_message_id: Optional[str] = None
     direction: str
+    to_email: str
     subject: Optional[str] = None
     body_html: Optional[str] = None
     status: str

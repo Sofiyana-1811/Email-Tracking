@@ -169,11 +169,14 @@ async def update_email_fields(db: AsyncSession, email_id: uuid.UUID, **kwargs) -
 
 async def list_emails(
     db: AsyncSession, 
+    workspace_id: Optional[uuid.UUID] = None,
     campaign_id: Optional[uuid.UUID] = None, 
     prospect_id: Optional[uuid.UUID] = None
 ) -> List[models.Email]:
     stmt = select(models.Email)
     filters = []
+    if workspace_id is not None:
+        filters.append(models.Email.workspace_id == workspace_id)
     if campaign_id is not None:
         filters.append(models.Email.campaign_id == campaign_id)
     if prospect_id is not None:
